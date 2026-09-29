@@ -15,6 +15,7 @@ var _state: StateManager3D
 func _init_physics_space() -> void:
 	physics_space = get_viewport().world_3d.space
 	PhysicsServer3D.space_set_active(physics_space, false)
+	add_to_group("rapier_driver")
 
 	_state = StateManager3D.new()
 	_state.root_node = self
@@ -30,6 +31,65 @@ func _physics_step(delta) -> void:
 
 func _snapshot_space(tick: int) -> void:
 	_state.cache_state(physics_space, tick)
+
+
+## Drop every cached state tagged at or before [param tick].
+##
+## Mid-session spawns leave the rolling cache holding snapshots from before
+## the new bodies existed. Restoring one of those swaps the Rapier world to
+## a state that does not contain the new bodies, orphaning them from the
+## simulation. After any mid-session spawn, invalidate the cache through the
+## current tick: restores targeting those ticks become cache misses (the
+## rollback window replays from the live state instead), and the first
+## post-spawn snapshots rebuild a cache that contains the new bodies.
+func invalidate_space_cache_through(tick: int) -> void:
+	var tags: Array = _state.ordered_cache_tags()
+	for i: int in range(tags.size() - 1, -1, -1):
+		if int(tags[i]) <= tick:
+			_state.remove_cached_by_index(i)
+
+
+## Invalidate the space cache of the active [RapierDriver3D] through the
+## current tick, for callers that just spawned physics bodies mid-session.
+##
+## The driver is found through the [code]rapier_driver[/code] group, which
+## it joins on init. Spawners that add physics bodies to the tree during a
+## live session should call this right after the spawn.
+static func invalidate_for_spawn(tree: SceneTree) -> void:
+	var driver := tree.get_first_node_in_group("rapier_driver") as RapierDriver3D
+	if driver != null:
+		driver.invalidate_space_cache_through(NetworkTime.tick)
+
+
+## Drop the whole space cache.
+func clear_space_cache() -> void:
+	_state.clear_cache()
+
+
+## Cache the current space state under an arbitrary [param tick].
+##
+## Useful for anchoring flows: after restoring a transferred or joined
+## space state, cache it under the tick it was exported at, so resim windows
+## that rewind to that tick restore the anchored state instead of missing.
+func cache_space_state_at(tick: int) -> void:
+	_state.cache_state(physics_space, tick)
+
+
+## Serialize the entire Rapier space (bodies, velocities, sleep and solver
+## internals) as opaque bytes.
+##
+## Paired with [method import_space_state] this transfers a full physics
+## snapshot between peers without any per-body property round trip.
+func export_space_state() -> PackedByteArray:
+	return _state.export_state(physics_space, "RustBincode")
+
+
+## Restore a space state previously exported with
+## [method export_space_state], then re-register moving bodies with the
+## engine's node sync, as a whole-space restore can unregister them.
+func import_space_state(data: PackedByteArray) -> void:
+	_state.import_state(physics_space, data)
+	_re_register_moving_bodies()
 
 
 func _rollback_space(tick: int) -> void:
