@@ -2,6 +2,13 @@ extends PhysicsDriver
 
 class_name RapierDriver3D
 
+## Whole-space restores swap out the entire Rapier world, which can leave
+## bodies that were awake before the restore unregistered from the engine's
+## node sync. Toggling [member RigidBody3D.sleeping] re-registers them.
+## Resting bodies are left alone: a strong wake resets their sleep timer, so
+## they would never fall asleep while rollback is active.
+const _RE_REGISTER_VELOCITY_EPSILON_SQUARED := 0.0225
+
 var _state: StateManager3D
 
 
@@ -38,3 +45,21 @@ func _rollback_space(tick: int) -> void:
 		return
 
 	_state.load_cached_state(physics_space, index)
+	_re_register_moving_bodies()
+
+
+## Re-register bodies with the engine's node sync after a whole-space
+## restore, so bodies that were awake before the restore keep simulating.
+## Only bodies moving faster than the sleep threshold are toggled: resting
+## bodies keep their position in the sleep queue, and a strong wake would
+## reset their timer on every resim window, preventing them from ever
+## falling asleep while inputs keep arriving.
+func _re_register_moving_bodies() -> void:
+	for node: Node in get_tree().get_nodes_in_group("network_rigid_body"):
+		var body := node as RigidBody3D
+		if body == null or body.sleeping:
+			continue
+		if body.linear_velocity.length_squared() <= _RE_REGISTER_VELOCITY_EPSILON_SQUARED:
+			continue
+		body.sleeping = true
+		body.sleeping = false
